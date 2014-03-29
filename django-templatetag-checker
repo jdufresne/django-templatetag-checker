@@ -1,0 +1,114 @@
+#!/usr/bin/env python3
+import os
+import re
+import sys
+
+
+def is_load_used_in_template(f, tags):
+    f.seek(0)
+    for line in f:
+        for tag in tags:
+            if re.search('{%%\s*%s' % re.escape(tag), line):
+                return True
+    return False
+
+
+def lib_template_tags(lib):
+    from django.conf import settings
+    from django.utils.importlib import import_module
+
+    for app in settings.INSTALLED_APPS:
+        path = '.'.join((app, 'templatetags', lib))
+        try:
+            mod = import_module(path)
+        except ImportError:
+            pass
+        else:
+            return mod.register.tags.keys()
+    raise ImportError('ImportError: No templatetag module named %s' % lib)
+
+
+def template_unused_loads(path):
+    regex = re.compile('{%\s*load\s+(\w+)')
+    libs = {}
+    with open(path) as f:
+        for line in f:
+            match = regex.search(line)
+            if match:
+                lib = match.group(1)
+                libs[lib] = lib_template_tags(lib)
+        for lib, tags in libs.items():
+            if not is_load_used_in_template(f, tags):
+                print '%s: %s' % (path, lib)
+
+
+def search_dir_unused_loads(path):
+    for dirpath, dirnames, filenames in os.walk(path):
+        for filename in filenames:
+            path = os.path.join(dirpath, filename)
+            template_unused_loads(path)
+
+
+def search_dir_used_tag(path, tag):
+    regex = re.compile('{%%\s*%s' % re.escape(tag))
+    for dirpath, dirnames, filenames in os.walk(path):
+        for filename in filenames:
+            path = os.path.join(dirpath, filename)
+            with open(path) as f:
+                for line in f:
+                    if regex.search(line):
+                        return True
+    return False
+
+
+def is_tag_used_in_templates(tag):
+    from django.conf import settings
+    from django.utils.importlib import import_module
+
+    cwd = os.getcwd()
+    for path in settings.TEMPLATE_DIRS:
+        if search_dir_used_tag(path, tag):
+            return True
+    for app in settings.INSTALLED_APPS:
+        mod = import_module(app)
+        path = os.path.dirname(mod.__file__)
+        if path.startswith(cwd):
+            if search_dir_used_tag(os.path.join(path, 'templates'), tag):
+                return True
+    return False
+
+
+def main():
+    from django.conf import settings
+    from django.utils.importlib import import_module
+
+    cwd = os.getcwd()
+
+    print('Unused templatetag loads:')
+    for path in settings.TEMPLATE_DIRS:
+        search_dir_unused_loads(path)
+
+    for app in settings.INSTALLED_APPS:
+        mod = import_module(app)
+        path = os.path.dirname(mod.__file__)
+        if path.startswith(cwd):
+            search_dir_unused_loads(os.path.join(path, 'templates'))
+
+    print('Unused templatetags:')
+    for app in settings.INSTALLED_APPS:
+        mod = import_module(app)
+        path = os.path.join(os.path.dirname(mod.__file__), 'templatetags')
+        if path.startswith(cwd):
+            for dirpath, dirnames, filenames in os.walk(path):
+                for filename in filenames:
+                    if filename.endswith('.py') and filename != '__init__.py':
+                        lib, ext = os.path.splitext(filename)
+                        for tag in lib_template_tags(lib):
+                            if not is_tag_used_in_templates(tag):
+                                print('%s: %s' % (os.path.join(path, filename), tag))
+
+
+if __name__ == '__main__':
+    cwd = os.getcwd()
+    sys.path.insert(0, cwd)
+    main()
