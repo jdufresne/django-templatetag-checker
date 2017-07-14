@@ -16,31 +16,52 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 import os
 import re
-import sys
+import site
+from importlib import import_module
+
+from django.apps import apps
+import django
+
+django.setup()
 
 
-def is_load_used_in_template(f, tags):
+def in_site_packages(path):
+    return any(
+        path.startswith(site_path)
+        for site_path in site.getsitepackages())
+
+
+def is_load_used_in_template(f, tag_filters):
+    tags, filters = tag_filters
+
     f.seek(0)
     for line in f:
         for tag in tags:
-            if re.search('{%%\s*%s' % re.escape(tag), line):
+            if re.search(r'{%%\s*%s' % re.escape(tag), line):
                 return True
+        for tag in filters:
+            if re.search(r'\|\s*%s' % re.escape(tag), line):
+                return True
+
     return False
 
 
 def lib_template_tags(lib):
-    from django.conf import settings
-    from django.utils.importlib import import_module
-
-    for app in settings.INSTALLED_APPS:
-        path = '.'.join((app, 'templatetags', lib))
+    for app in apps.get_app_configs():
+        path = '%s.templatetags.%s' % (app.module.__name__, lib)
         try:
             mod = import_module(path)
         except ImportError:
             pass
         else:
-            return mod.register.tags.keys()
-    raise ImportError('ImportError: No templatetag module named %s' % lib)
+            return mod.register.tags.keys(), mod.register.filters.keys()
+    path = 'django.templatetags.%s' % lib
+    try:
+        mod = import_module(path)
+    except ImportError:
+        raise ImportError('ImportError: No templatetag module named %s' % lib)
+    else:
+        return mod.register.tags.keys(), mod.register.filters.keys()
 
 
 def template_unused_loads(path):
@@ -51,10 +72,11 @@ def template_unused_loads(path):
             match = regex.search(line)
             if match:
                 lib = match.group(1)
-                libs[lib] = lib_template_tags(lib)
+                if lib != 'static':
+                    libs[lib] = lib_template_tags(lib)
         for lib, tags in libs.items():
             if not is_load_used_in_template(f, tags):
-                print '%s: %s' % (path, lib)
+                print('%s: %s' % (path, lib))
 
 
 def search_dir_unused_loads(path):
@@ -78,16 +100,14 @@ def search_dir_used_tag(path, tag):
 
 def is_tag_used_in_templates(tag):
     from django.conf import settings
-    from django.utils.importlib import import_module
 
-    cwd = os.getcwd()
-    for path in settings.TEMPLATE_DIRS:
-        if search_dir_used_tag(path, tag):
-            return True
-    for app in settings.INSTALLED_APPS:
-        mod = import_module(app)
-        path = os.path.dirname(mod.__file__)
-        if path.startswith(cwd):
+    for template_settings in settings.TEMPLATES:
+        for path in template_settings['DIRS']:
+            if search_dir_used_tag(path, tag):
+                return True
+    for app in apps.get_app_configs():
+        path = app.path
+        if not in_site_packages(path):
             if search_dir_used_tag(os.path.join(path, 'templates'), tag):
                 return True
     return False
@@ -95,35 +115,29 @@ def is_tag_used_in_templates(tag):
 
 def main():
     from django.conf import settings
-    from django.utils.importlib import import_module
-
-    cwd = os.getcwd()
 
     print('Unused templatetag loads:')
-    for path in settings.TEMPLATE_DIRS:
-        search_dir_unused_loads(path)
+    for template_settings in settings.TEMPLATES:
+        for path in template_settings['DIRS']:
+            search_dir_unused_loads(path)
 
-    for app in settings.INSTALLED_APPS:
-        mod = import_module(app)
-        path = os.path.dirname(mod.__file__)
-        if path.startswith(cwd):
+    for app in apps.get_app_configs():
+        path = app.path
+        if not in_site_packages(path):
             search_dir_unused_loads(os.path.join(path, 'templates'))
 
     print('Unused templatetags:')
-    for app in settings.INSTALLED_APPS:
-        mod = import_module(app)
-        path = os.path.join(os.path.dirname(mod.__file__), 'templatetags')
-        if path.startswith(cwd):
+    for app in apps.get_app_configs():
+        path = os.path.join(app.path, 'templatetags')
+        if not in_site_packages(path):
             for dirpath, dirnames, filenames in os.walk(path):
                 for filename in filenames:
                     if filename.endswith('.py') and filename != '__init__.py':
                         lib, ext = os.path.splitext(filename)
-                        for tag in lib_template_tags(lib):
+                        for tag in lib_template_tags(lib)[0]:
                             if not is_tag_used_in_templates(tag):
                                 print('%s: %s' % (os.path.join(path, filename), tag))
 
 
 if __name__ == '__main__':
-    cwd = os.getcwd()
-    sys.path.insert(0, cwd)
     main()
